@@ -9,6 +9,12 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Log;
 
+
+use Ultra\TranslationManager\Interfaces\LoggerInterface;
+use Ultra\TranslationManager\Loggers\DefaultLogger;
+use Ultra\TranslationManager\Loggers\ULMLogger;
+use Ultra\TranslationManager\Interfaces\ErrorReporter;
+use Ultra\TranslationManager\ErrorReporters\DefaultErrorReporter;
 /**
  * Ultra Translation Manager (UTM).
  *
@@ -43,18 +49,47 @@ class TranslationManager implements TranslatorContract
      */
     protected ?LaravelTranslator $laravelTranslator = null;
 
+
+    /**
+     * Error reporter instance for reporting errors.
+     *
+     * @var ErrorReporter
+     */
+    protected ErrorReporter $errorReporter;
+    
+    /**
+     * Logger instance for logging actions and errors.
+     *
+     * @var LoggerInterface
+     */
+    protected LoggerInterface $logger;
+
     /**
      * Constructor: Initializes configuration only.
      */
-    public function __construct()
-    {
+    public function __construct(
+        ?ErrorReporter $errorReporter = null,
+        ?LoggerInterface $logger = null
+    ) {
         $this->config = config('translation-manager') ?? [
             'default_locale' => env('APP_LOCALE', 'en'),
             'fallback_locale' => env('APP_FALLBACK_LOCALE', 'en'),
             'cache_enabled' => env('TRANSLATION_CACHE_ENABLED', false),
-            'cache_prefix' => 'utm_translations',
+            'cache_prefix' => 'ultra_translations',
         ];
-        Log::debug("[UTM] TranslationManager instantiated. Cache enabled: " . ($this->config['cache_enabled'] ? 'YES' : 'NO'));
+        $this->errorReporter = $errorReporter ?? new DefaultErrorReporter();
+        $this->logger = $logger ?? new ULMLogger(); // ULM è ora la scelta predefinita
+        $this->logger->debug("[UTM] TranslationManager instantiated. Cache enabled: " . ($this->config['cache_enabled'] ? 'YES' : 'NO'));
+    }
+
+    public function setErrorReporter(ErrorReporter $errorReporter): void
+    {
+        $this->errorReporter = $errorReporter;
+    }
+
+    public function setLogger(LoggerInterface $logger): void
+    {
+        $this->logger = $logger;
     }
 
     /**
@@ -184,38 +219,58 @@ class TranslationManager implements TranslatorContract
     public function registerPackageTranslations(string $package, string $baseLangPath): void
     {
         if (!File::isDirectory($baseLangPath)) {
-            Log::warning("[UTM Register] Invalid base path for package '{$package}': {$baseLangPath}");
+            $this->errorReporter->report('TRANSLATION_FILE_NOT_FOUND', [
+                'package' => $package,
+                'path' => $baseLangPath,
+                'locale' => $this->getLocale(),
+            ]);
+            $this->logger->warning("[UTM Register] Invalid base path for package '{$package}': {$baseLangPath}");
             return;
         }
-        Log::info("[UTM Register] Registering translations for package: '{$package}', path: '{$baseLangPath}'");
 
         $locales = $this->getAvailableLocales($baseLangPath);
         if (empty($locales)) {
-            Log::warning("[UTM Register] No language directories found in: {$baseLangPath}");
+            $this->errorReporter->report('TRANSLATION_FILE_NOT_FOUND', [
+                'package' => $package,
+                'path' => $baseLangPath,
+                'reason' => 'No language directories found',
+            ]);
+            $this->logger->warning("[UTM Register] No language directories found in: {$baseLangPath}");
             return;
         }
 
         foreach ($locales as $locale) {
             $translationFilePath = $this->buildTranslationFilePath($baseLangPath, $locale, $package);
-            Log::debug("[UTM Register] Checking file: {$translationFilePath}");
+            $this->logger->debug("[UTM Register] Checking file: {$translationFilePath}");
 
             if (File::exists($translationFilePath)) {
                 try {
                     $translations = include $translationFilePath;
-                    if (is_array($translations)) {
-                        $this->loadTranslationsIntoMemory($package, $locale, $translations);
-                        Log::debug("[UTM Register] Translations loaded successfully for '{$package}' [{$locale}].");
-                    } else {
-                        Log::warning("[UTM Register] File did not return an array: {$translationFilePath}");
+                    if (!is_array($translations)) {
+                        $this->errorReporter->report('TRANSLATION_FILE_INVALID', [
+                            'package' => $package,
+                            'locale' => $locale,
+                            'file' => $translationFilePath,
+                        ]);
+                        $this->logger->warning("[UTM Register] File did not return an array: {$translationFilePath}");
+                        continue;
                     }
+                    $this->loadTranslationsIntoMemory($package, $locale, $translations);
+                    $this->logger->debug("[UTM Register] Translations loaded successfully for '{$package}' [{$locale}].");
                 } catch (\Throwable $e) {
-                    Log::error("[UTM Register] Error including file: {$translationFilePath} - Error: " . $e->getMessage());
+                    $this->errorReporter->report('TRANSLATION_PROCESSING_ERROR', [
+                        'package' => $package,
+                        'locale' => $locale,
+                        'file' => $translationFilePath,
+                        'exception' => $e->getMessage(),
+                    ], $e);
+                    $this->logger->error("[UTM Register] Error including file: {$translationFilePath} - Error: " . $e->getMessage());
                 }
             } else {
-                Log::debug("[UTM Register] File not found: {$translationFilePath}");
+                $this->logger->debug("[UTM Register] File not found: {$translationFilePath}");
             }
         }
-    }
+        }
 
     //--------------------------------------------------------------------------
     // Protected helper methods
