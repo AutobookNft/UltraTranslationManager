@@ -3,6 +3,7 @@
 
 namespace Ultra\TranslationManager\ErrorReporters;
 
+use Illuminate\Support\Facades\Log;
 use Ultra\TranslationManager\Interfaces\ErrorReporter;
 
 class DefaultErrorReporter implements ErrorReporter
