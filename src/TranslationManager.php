@@ -1,454 +1,419 @@
 <?php
 
+declare(strict_types=1);
+
 namespace Ultra\TranslationManager;
 
+use Illuminate\Contracts\Foundation\Application;
+use Illuminate\Contracts\Cache\Factory as CacheFactory;
 use Illuminate\Contracts\Translation\Translator as TranslatorContract;
+use Illuminate\Filesystem\Filesystem;
 use Illuminate\Translation\Translator as LaravelTranslator;
-use Illuminate\Support\Facades\App;
-use Illuminate\Support\Facades\Cache;
-use Illuminate\Support\Facades\File;
-use Illuminate\Support\Facades\Log;
+// Usa le interfacce specifiche di UTM
+use Ultra\TranslationManager\Interfaces\ErrorReporter as UtmErrorReporterInterface;
+use Ultra\TranslationManager\Interfaces\LoggerInterface as UtmLoggerInterface;
+use Throwable;
 
-
-use Ultra\TranslationManager\Interfaces\LoggerInterface;
-use Ultra\TranslationManager\Loggers\DefaultLogger;
-use Ultra\TranslationManager\Loggers\ULMLogger;
-use Ultra\TranslationManager\Interfaces\ErrorReporter;
-use Ultra\TranslationManager\ErrorReporters\DefaultErrorReporter;
 /**
- * Ultra Translation Manager (UTM).
+ * 🎯 Ultra Translation Manager (UTM) – Oracoded Core (Standalone Version)
  *
  * Manages translations for the Ultra ecosystem, implementing Laravel's Translator
- * contract with package-specific loading and optional caching.
+ * contract. Handles package-specific loading, optional caching, and delegates
+ * functionality to injected dependencies (Laravel Translator, Cache, Filesystem,
+ * standard PSR-3 Logger via UTM interfaces).
+ * This version is Facade-free and **independent of UltraLogManager (ULM)**.
+ *
+ * 🧱 Structure:
+ * - Implements TranslatorContract.
+ * - Injects Application, CacheFactory, Filesystem, UtmLoggerInterface, UtmErrorReporterInterface, config array.
+ * - Stores loaded translations in memory (`$translations`).
+ * - Uses setter injection for the core LaravelTranslator instance.
+ * - Parses keys (`package::group.item`) for package/group identification.
+ * - Fetches translations from memory, cache (if enabled), or LaravelTranslator fallback.
+ * - Uses injected logger/error reporter (now based on standard PSR-3 logger).
+ *
+ * 📡 Communicates:
+ * - With Laravel Application container (via injected $app) for locale management.
+ * - With Cache system (via injected $cache) for storing/retrieving translations.
+ * - With Filesystem (via injected $files) for reading language directories/files.
+ * - With injected UtmLoggerInterface (DefaultLogger -> PSR-3) for logging activities.
+ * - With injected UtmErrorReporterInterface (DefaultErrorReporter -> PSR-3) for reporting issues.
+ * - With injected LaravelTranslator for fallback translation retrieval and `choice` method.
+ *
+ * 🧪 Testable:
+ * - All external dependencies are injected via constructor or setter.
+ * - No static dependencies.
+ * - Independent of ULM, relies on standard PSR-3 logger contract.
  *
  * @package Ultra\TranslationManager
- * @author [Fabio Cherici]
- * @version 1.0
+ * @version 1.2 (Oracode Standalone Refactored)
  */
-class TranslationManager implements TranslatorContract
+final class TranslationManager implements TranslatorContract
 {
-    /**
-     * Loaded translations from registered packages.
-     * Structure: ['packageName']['locale']['key'] => 'translation'
-     *
-     * @var array
-     */
+    // --- Nessuna modifica necessaria alle proprietà ---
+    /** @var array<string, array<string, array<string, string|array>>> */
     protected array $translations = [];
-
-    /**
-     * Configuration loaded from config/translation-manager.php.
-     *
-     * @var array
-     */
-    protected array $config;
-
-    /**
-     * Instance of Laravel's standard translator for delegation/fallback.
-     *
-     * @var LaravelTranslator|null
-     */
+    /** @var LaravelTranslator|null */
     protected ?LaravelTranslator $laravelTranslator = null;
-
+    protected readonly Application $app;
+    protected readonly CacheFactory $cache;
+    protected readonly Filesystem $files;
+    protected readonly UtmLoggerInterface $logger; // Questa ora punta a DefaultLogger(PSR-3)
+    protected readonly UtmErrorReporterInterface $errorReporter; // Questa ora punta a DefaultErrorReporter(PSR-3)
+    protected readonly array $config;
 
     /**
-     * Error reporter instance for reporting errors.
+     * 🎯 Constructor: Injects all required dependencies and configuration.
+     * Dependencies now include standard Laravel/PSR components via UTM interfaces.
      *
-     * @var ErrorReporter
-     */
-    protected ErrorReporter $errorReporter;
-    
-    /**
-     * Logger instance for logging actions and errors.
-     *
-     * @var LoggerInterface
-     */
-    protected LoggerInterface $logger;
-
-    /**
-     * Constructor: Initializes configuration only.
+     * @param Application $app Laravel application instance.
+     * @param CacheFactory $cache Cache factory for accessing cache stores.
+     * @param Filesystem $files Filesystem instance for file operations.
+     * @param UtmLoggerInterface $logger Logger instance (DefaultLogger wrapping PSR-3).
+     * @param UtmErrorReporterInterface $errorReporter Error reporter instance (DefaultErrorReporter wrapping PSR-3).
+     * @param array $config Configuration array loaded from translation-manager.php.
      */
     public function __construct(
-        ?ErrorReporter $errorReporter = null,
-        ?LoggerInterface $logger = null
+        Application $app,
+        CacheFactory $cache,
+        Filesystem $files,
+        UtmLoggerInterface $logger, // Iniezione non cambia, ma l'implementazione sottostante sì
+        UtmErrorReporterInterface $errorReporter, // Iniezione non cambia
+        array $config
     ) {
-        $this->config = config('translation-manager') ?? [
-            'default_locale' => env('APP_LOCALE', 'en'),
-            'fallback_locale' => env('APP_FALLBACK_LOCALE', 'en'),
-            'cache_enabled' => env('TRANSLATION_CACHE_ENABLED', false),
-            'cache_prefix' => 'ultra_translations',
-        ];
-        $this->errorReporter = $errorReporter ?? new DefaultErrorReporter();
-        $this->logger = $logger ?? new ULMLogger(); // ULM è ora la scelta predefinita
-        $this->logger->debug("[UTM] TranslationManager instantiated. Cache enabled: " . ($this->config['cache_enabled'] ? 'YES' : 'NO'));
-    }
-
-    public function setErrorReporter(ErrorReporter $errorReporter): void
-    {
-        $this->errorReporter = $errorReporter;
-    }
-
-    public function setLogger(LoggerInterface $logger): void
-    {
+        $this->app = $app;
+        $this->cache = $cache;
+        $this->files = $files;
         $this->logger = $logger;
+        $this->errorReporter = $errorReporter;
+        $this->config = $config;
+
+        // Log iniziale non cambia
+        $this->logger->debug(
+            "[UTM] TranslationManager instantiated (Standalone Mode). Cache enabled: " .
+            ($this->config['cache_enabled'] ? 'YES' : 'NO')
+        );
     }
 
     /**
-     * Adds a new namespace to the loader, delegating to the injected Laravel translator.
-     *
-     * @param string $namespace The namespace to add
-     * @param string $hint The path hint for the namespace
-     * @return void
-     */
-    public function addNamespace(string $namespace, string $hint): void
-    {
-        if ($this->laravelTranslator && method_exists($this->laravelTranslator, 'addNamespace')) {
-            Log::debug("[UTM] addNamespace called for namespace '{$namespace}' with hint '{$hint}'. Delegating to LaravelTranslator.");
-            $this->laravelTranslator->addNamespace($namespace, $hint);
-        } else {
-            Log::error("[UTM] addNamespace called but LaravelTranslator is unavailable or lacks the method!");
-        }
-    }
-
-    /**
-     * Sets the instance of Laravel's standard translator.
-     *
-     * @param LaravelTranslator $translator The translator instance to inject
+     * 🎯 Inject the Laravel Translator instance.
+     * 
+     * @param LaravelTranslator $translator The translator instance to inject.
      * @return void
      */
     public function setLaravelTranslator(LaravelTranslator $translator): void
     {
         $this->laravelTranslator = $translator;
-        Log::debug("[UTM] LaravelTranslator injected into TranslationManager.");
+        $this->logger->debug("[UTM] LaravelTranslator injected into TranslationManager.");
     }
 
-    //--------------------------------------------------------------------------
-    // Required methods from TranslatorContract
-    //--------------------------------------------------------------------------
-
     /**
-     * Gets the translation for a given key.
-     *
-     * @param string $key The translation key
-     * @param array $replace Array of replacements
-     * @param string|null $locale The locale to use, or null for default
-     * @return mixed
+     * {@inheritdoc}
+     * Adheres strictly to the basic Translator interface definition provided.
      */
-    public function get($key, array $replace = [], $locale = null)
+    public function get($key, array $replace = [], $locale = null) // Firma come da interfaccia base
     {
-        $fallback = true;
-        Log::debug("[UTM GET ENTRY] Request for key: '{$key}', locale: '{$locale}'");
-        list($package, $group, $item) = $this->parseKey($key);
-        $locale = $locale ?? $this->getLocale();
+        $fallback = true; // Comportamento di default interno
 
-        $cacheKey = ($this->config['cache_prefix'] ?? 'utm') . ".{$locale}." . ($package ?? 'APP') . "." . ($group ?? '') . "." . $item;
+        $this->logger->debug("[UTM GET ENTRY] Request for key: '{$key}', locale: '{$locale}'");
+        $key = (string) $key;
+        $locale = $locale === null ? null : (string) $locale;
 
-        if ($this->config['cache_enabled'] ?? true) {
-            $translation = Cache::rememberForever($cacheKey, function () use ($group, $item, $package, $locale, $replace, $fallback) {
-                return $this->fetchTranslation($group, $item, $package, $locale, $replace, $fallback);
+        [$package, $group, $item] = $this->parseKey($key);
+        $currentLocale = $locale ?? $this->getLocale();
+
+        $cacheKey = $this->buildCacheKey($package, $group, $item, $currentLocale);
+
+        if ($this->config['cache_enabled'] ?? false) {
+            $translation = $this->cache->store()->rememberForever($cacheKey, function () use ($group, $item, $package, $currentLocale, $replace, $fallback) {
+                return $this->fetchTranslation($group, $item, $package, $currentLocale, $replace, $fallback);
             });
-            $originalKey = $key;
-            if ($translation === $this->getMissingKeyMarker($package, $group, $item)) {
-                Log::debug("[UTM] 'Missing' value found in cache for '{$cacheKey}'.");
-                return $originalKey;
+
+            $missingMarker = $this->getMissingKeyMarker($package, $group, $item);
+            if ($translation === $missingMarker) {
+                 $this->logger->debug("[UTM] 'Missing' marker found in cache for '{$cacheKey}'. Returning original key via LaravelTranslator.");
+                 return $this->laravelTranslator ? $this->laravelTranslator->get($key, $replace, $currentLocale, true) : $key;
             }
+             $this->logger->debug("[UTM GET CACHE HIT] Returning cached: '{$cacheKey}'");
+
         } else {
-            $translation = $this->fetchTranslation($group, $item, $package, $locale, $replace, $fallback);
-            $originalKey = $key;
-            if ($translation === $this->getMissingKeyMarker($package, $group, $item)) {
-                return $originalKey;
+            $translation = $this->fetchTranslation($group, $item, $package, $currentLocale, $replace, $fallback);
+            $missingMarker = $this->getMissingKeyMarker($package, $group, $item);
+             if ($translation === $missingMarker) {
+                 $this->logger->debug("[UTM] 'Missing' marker found during fetch for key '{$key}'. Returning original key via LaravelTranslator.");
+                 return $this->laravelTranslator ? $this->laravelTranslator->get($key, $replace, $currentLocale, true) : $key;
             }
+             $this->logger->debug("[UTM GET NO CACHE] Returning fetched value for key '{$key}'");
         }
-        Log::debug("[UTM GET RETURN] Returning: '{$translation}'");
-        return (string) $translation;
+
+        return is_string($translation) ? $this->replacePlaceholders($translation, $replace) : $translation;
     }
 
     /**
-     * Gets a translation according to an integer value.
-     *
-     * @param string $key The translation key
-     * @param \Countable|int|float|array $number The number determining plural form
-     * @param array $replace Array of replacements
-     * @param string|null $locale The locale to use, or null for default
-     * @return string
+     * {@inheritdoc}
+     * Adheres strictly to the basic Translator interface definition provided.
      */
-    public function choice($key, $number, array $replace = [], $locale = null)
+    public function setLocale($locale): void // Firma come da interfaccia base
+    {
+        $locale = (string) $locale;
+        if ($this->app->getLocale() !== $locale) {
+            $this->app->setLocale($locale);
+            $this->logger->info("[UTM] Application locale set to: {$locale}");
+        }
+    }
+
+   /**
+     * 🎯 Gets the default locale being used from the injected Application instance.
+     *
+     * @return string The current application locale.
+     */
+    public function getLocale(): string // <- Abbiamo il return type hint 'string'
+    {
+        // Use injected application instance
+        return $this->app->getLocale();
+    }
+
+    /**
+     * {@inheritdoc}
+     * Delegates directly to the injected LaravelTranslator.
+     */
+    public function choice($key, $number, array $replace = [], $locale = null): string
     {
         if (!$this->laravelTranslator) {
-            Log::error("[UTM] choice() called but LaravelTranslator is unavailable!");
-            return $key;
+            $this->logger->error("[UTM] choice() called but LaravelTranslator is unavailable!");
+            return (string) $key; // Cast a string per sicurezza
         }
-        Log::debug("[UTM] choice() called for: key='{$key}'. Delegating to LaravelTranslator.");
+        $this->logger->debug("[UTM] choice() called for: key='{$key}'. Delegating to LaravelTranslator.");
         return $this->laravelTranslator->choice($key, $number, $replace, $locale);
     }
 
-    /**
-     * Gets the default locale being used.
-     *
-     * @return string
+     /**
+     * {@inheritdoc}
+     * Delegates to the injected Laravel translator if available.
      */
-    public function getLocale(): string
+    public function addNamespace(string $namespace, string $hint): void
     {
-        return App::getLocale() ?? $this->config['default_locale'] ?? 'en';
-    }
-
-    /**
-     * Sets the default locale.
-     *
-     * @param string $locale The locale to set
-     * @return void
-     */
-    public function setLocale($locale): void
-    {
-        if (App::getLocale() !== $locale) {
-            App::setLocale($locale);
-            Log::info("[UTM] Application locale set to: {$locale}");
+        if ($this->laravelTranslator && method_exists($this->laravelTranslator, 'addNamespace')) {
+            $this->logger->debug("[UTM] addNamespace called for namespace '{$namespace}' with hint '{$hint}'. Delegating to LaravelTranslator.");
+            $this->laravelTranslator->addNamespace($namespace, $hint);
+        } else {
+            $this->logger->error("[UTM] addNamespace called but LaravelTranslator is unavailable or lacks the method!");
         }
     }
 
-    //--------------------------------------------------------------------------
-    // UTM-specific public methods
-    //--------------------------------------------------------------------------
-
-    /**
-     * Registers translation files for a package.
+     /**
+     * 🎯 Registers translation files for a specific package (Standalone Mode).
+     * Loads translations from the package's language directory into memory.
+     * Uses injected Filesystem, Logger, and ErrorReporter.
      *
-     * @param string $package The package name
-     * @param string $baseLangPath The base language directory path
+     * @param string $package The package name (used as the translation namespace/group).
+     * @param string $baseLangPath The base language directory path for this package.
      * @return void
      */
     public function registerPackageTranslations(string $package, string $baseLangPath): void
     {
-        if (!File::isDirectory($baseLangPath)) {
-            $this->errorReporter->report('TRANSLATION_FILE_NOT_FOUND', [
-                'package' => $package,
-                'path' => $baseLangPath,
-                'locale' => $this->getLocale(),
-            ]);
+    
+         if (!$this->files->isDirectory($baseLangPath)) {
+            $this->errorReporter->report('TRANSLATION_PATH_INVALID', ['package' => $package, 'path' => $baseLangPath]);
             $this->logger->warning("[UTM Register] Invalid base path for package '{$package}': {$baseLangPath}");
             return;
         }
-
-        $locales = $this->getAvailableLocales($baseLangPath);
-        if (empty($locales)) {
-            $this->errorReporter->report('TRANSLATION_FILE_NOT_FOUND', [
-                'package' => $package,
-                'path' => $baseLangPath,
-                'reason' => 'No language directories found',
-            ]);
+    
+         $locales = $this->getAvailableLocales($baseLangPath);
+         if (empty($locales)) {
+            $this->errorReporter->report('TRANSLATION_LOCALES_NOT_FOUND', ['package' => $package,'path' => $baseLangPath]);
             $this->logger->warning("[UTM Register] No language directories found in: {$baseLangPath}");
-            return;
-        }
-
-        foreach ($locales as $locale) {
+             return;
+         }
+         foreach ($locales as $locale) {
             $translationFilePath = $this->buildTranslationFilePath($baseLangPath, $locale, $package);
-            $this->logger->debug("[UTM Register] Checking file: {$translationFilePath}");
-
-            if (File::exists($translationFilePath)) {
-                try {
-                    $translations = include $translationFilePath;
-                    if (!is_array($translations)) {
-                        $this->errorReporter->report('TRANSLATION_FILE_INVALID', [
-                            'package' => $package,
-                            'locale' => $locale,
-                            'file' => $translationFilePath,
-                        ]);
-                        $this->logger->warning("[UTM Register] File did not return an array: {$translationFilePath}");
-                        continue;
-                    }
-                    $this->loadTranslationsIntoMemory($package, $locale, $translations);
-                    $this->logger->debug("[UTM Register] Translations loaded successfully for '{$package}' [{$locale}].");
-                } catch (\Throwable $e) {
-                    $this->errorReporter->report('TRANSLATION_PROCESSING_ERROR', [
-                        'package' => $package,
-                        'locale' => $locale,
-                        'file' => $translationFilePath,
-                        'exception' => $e->getMessage(),
-                    ], $e);
-                    $this->logger->error("[UTM Register] Error including file: {$translationFilePath} - Error: " . $e->getMessage());
-                }
-            } else {
-                $this->logger->debug("[UTM Register] File not found: {$translationFilePath}");
-            }
-        }
-        }
-
-    //--------------------------------------------------------------------------
-    // Protected helper methods
-    //--------------------------------------------------------------------------
-
-    /**
-     * Fetches a translation, first from internal array, then via Laravel fallback.
-     *
-     * @param string|null $group The translation group (file name)
-     * @param string $item The translation item (key)
-     * @param string|null $package The package name
-     * @param string $locale The locale to use
-     * @param array $replace Array of replacements
-     * @param bool $fallback Whether to use fallback
-     * @return string|array
-     */
-    protected function fetchTranslation(?string $group, string $item, ?string $package, string $locale, array $replace, bool $fallback): string|array
-    {
-        Log::debug("[UTM Fetch] Starting fetch for item='{$item}', group='{$group}', package='{$package}', locale='{$locale}'");
-
-        if ($package && isset($this->translations[$package][$locale])) {
-            Log::debug("[UTM Fetch] Checking internal array for '{$package}' [{$locale}]...");
-            Log::debug("[UTM Fetch] Array content: " . print_r($this->translations[$package][$locale], true));
-
-            if (\Illuminate\Support\Arr::has($this->translations[$package][$locale], $item)) {
-                $translation = \Illuminate\Support\Arr::get($this->translations[$package][$locale], $item);
-                Log::debug("[UTM Fetch] Item '{$item}' FOUND internally (package: '{$package}').");
-                return is_string($translation) ? $this->replacePlaceholders($translation, $replace) : $translation;
-            } else {
-                Log::debug("[UTM Fetch] Item '{$item}' NOT found internally in [{$package}][{$locale}]. Falling back...");
-            }
-        } else {
-            Log::debug("[UTM Fetch] Internal array for '{$package}' [{$locale}] not found. Falling back...");
-        }
-
-        $originalKey = $package ? "{$package}::" : '';
-        $originalKey .= $group ? "{$group}.{$item}" : $item;
-
-        Log::debug("[UTM Fetch] Attempting fallback with Laravel key: '{$originalKey}'");
-        if (!$this->laravelTranslator) { /* ... */ }
-        $translation = $this->laravelTranslator->get($originalKey, $replace, $locale);
-
-        $isMissing = ($translation === $originalKey);
-        if ($isMissing) {
-            Log::warning("[UTM Fetch] Fallback failed to find key: '{$originalKey}'.");
-            return "[Missing: {$originalKey}]";
-        } else {
-            Log::debug("[UTM Fetch] Key '{$originalKey}' FOUND via fallback.");
-            return $translation;
-        }
+             $this->logger->debug("[UTM Register] Checking file: {$translationFilePath}");
+             if ($this->files->exists($translationFilePath)) {
+                 try {
+                    $translations = $this->files->getRequire($translationFilePath);
+                     if (!is_array($translations)) {
+                        $this->errorReporter->report('TRANSLATION_FILE_INVALID', ['package' => $package,'locale' => $locale,'file' => $translationFilePath]);
+                         $this->logger->warning("[UTM Register] File did not return an array: {$translationFilePath}");
+                         continue;
+                     }
+                     $this->loadTranslationsIntoMemory($package, $locale, $translations);
+                     $this->logger->debug("[UTM Register] Translations loaded successfully for '{$package}' [{$locale}].");
+                 } catch (Throwable $e) {
+                    $this->errorReporter->report('TRANSLATION_PROCESSING_ERROR', ['package' => $package,'locale' => $locale,'file' => $translationFilePath,'exception_message' => $e->getMessage()], $e);
+                     $this->logger->error("[UTM Register] Error processing file: {$translationFilePath} - Error: " . $e->getMessage());
+                 }
+             } else {
+                 $this->logger->debug("[UTM Register] File not found: {$translationFilePath}");
+             }
+         }
     }
 
+    
     /**
-     * Loads an array of translations into internal memory.
-     *
-     * @param string $package The package name
-     * @param string $locale The locale
-     * @param array $translations The translations to load
-     * @return void
-     */
-    protected function loadTranslationsIntoMemory(string $package, string $locale, array $translations): void
-    {
-        if (!isset($this->translations[$package])) {
-            $this->translations[$package] = [];
-        }
-        if (!isset($this->translations[$package][$locale])) {
-            $this->translations[$package][$locale] = [];
-        }
-        $this->translations[$package][$locale] = array_merge(
-            $this->translations[$package][$locale],
-            $translations
-        );
-    }
+     * 🧱 Fetches a translation (Standalone Mode). Checks memory, cache, then Laravel fallback.
+     * Returns a unique marker string if the key is ultimately not found.
+     * Uses injected Logger and LaravelTranslator.
+    */
+     protected function fetchTranslation(?string $group, string $item, ?string $package, string $locale, array $replace, bool $fallback): string|array
+     {
+         $this->logger->debug("[UTM Fetch] Starting fetch for item='{$item}', group='{$group}', package='{$package}', locale='{$locale}'");
+         // 1. Check In-Memory Cache
+         if ($package && isset($this->translations[$package][$locale])) {
+             $keyInDotNotation = $group ? "{$group}.{$item}" : $item;
+             if (\Illuminate\Support\Arr::has($this->translations[$package][$locale], $keyInDotNotation)) {
+                $translation = \Illuminate\Support\Arr::get($this->translations[$package][$locale], $keyInDotNotation);
+                 $this->logger->debug("[UTM Fetch] Item '{$keyInDotNotation}' FOUND in-memory (package: '{$package}').");
+                 return $translation;
+             } else {
+                 $this->logger->debug("[UTM Fetch] Item '{$keyInDotNotation}' NOT found in-memory in [{$package}][{$locale}]. Proceeding to fallback...");
+             }
+         } else {
+             $this->logger->debug("[UTM Fetch] In-memory array for '{$package}' [{$locale}] not found or package is null. Proceeding to fallback...");
+         }
+         // 2. Fallback to Laravel Translator
+         if (!$this->laravelTranslator) {
+             $this->logger->error("[UTM Fetch] Fallback requested but LaravelTranslator is unavailable!");
+             return $this->getMissingKeyMarker($package, $group, $item);
+         }
+         $laravelKey = $package ? "{$package}::" : '';
+         $laravelKey .= $group ? "{$group}.{$item}" : $item;
+         $this->logger->debug("[UTM Fetch] Attempting fallback with Laravel key: '{$laravelKey}'");
+         $translation = $this->laravelTranslator->get($laravelKey, $replace, $locale, false);
+         if ($translation === $laravelKey) {
+             if ($fallback) {
+                 $this->logger->debug("[UTM Fetch] Key '{$laravelKey}' not found in '{$locale}', trying Laravel's fallback locale mechanism.");
+                 $translation = $this->laravelTranslator->get($laravelKey, $replace, $locale, true);
+                 if ($translation === $laravelKey) {
+                     $this->logger->warning("[UTM Fetch] Fallback failed to find key: '{$laravelKey}' even with fallback locale.");
+                     return $this->getMissingKeyMarker($package, $group, $item);
+                 } else {
+                     $this->logger->debug("[UTM Fetch] Key '{$laravelKey}' FOUND via Laravel fallback locale.");
+                     return $translation;
+                 }
+             } else {
+                 $this->logger->warning("[UTM Fetch] Fallback failed to find key: '{$laravelKey}' (fallback disabled).");
+                 return $this->getMissingKeyMarker($package, $group, $item);
+             }
+         } else {
+             $this->logger->debug("[UTM Fetch] Key '{$laravelKey}' FOUND via LaravelTranslator in locale '{$locale}'.");
+             return $translation;
+         }
+     }
 
     /**
-     * Finds available locale directories in the base path.
-     *
-     * @param string $baseLangPath The base language directory path
-     * @return array List of locale codes
+     * 🧱 Loads translations into memory (Standalone Mode).
+     * Uses injected Logger.
+     * 
      */
-    protected function getAvailableLocales(string $baseLangPath): array
-    {
+     protected function loadTranslationsIntoMemory(string $package, string $locale, array $translations): void
+     {
+         if (!isset($this->translations[$package])) {
+             $this->translations[$package] = [];
+         }
+         $this->translations[$package][$locale] = array_replace_recursive(
+             $this->translations[$package][$locale] ?? [],
+             $translations
+         );
+         $this->logger->debug("[UTM Memory Load] Merged translations for '{$package}' [{$locale}].");
+     }
+
+
+    /**
+     * 🧱 Finds available locale directories (Standalone Mode).
+     * Uses injected Filesystem and Logger.
+     * 
+     */
+     protected function getAvailableLocales(string $baseLangPath): array
+     {
         $locales = [];
-        if (File::isDirectory($baseLangPath)) {
-            $directories = File::directories($baseLangPath);
-            foreach ($directories as $directory) {
+         if ($this->files->isDirectory($baseLangPath)) {
+            $directories = $this->files->directories($baseLangPath);
+             foreach ($directories as $directory) {
                 $localeCode = basename($directory);
-                if (strlen($localeCode) === 2 || strlen($localeCode) === 5) {
+                 if (preg_match('/^[a-z]{2}(-[A-Z]{2})?$/', $localeCode)) {
                     $locales[] = $localeCode;
-                }
-            }
-        }
-        Log::debug("[UTM] Languages found in '{$baseLangPath}': " . implode(', ', $locales));
-        return $locales;
-    }
+                 } else {
+                    $this->logger->debug("[UTM] Ignoring directory '{$localeCode}' in '{$baseLangPath}' as it doesn't match locale format.");
+                 }
+             }
+         }
+         $this->logger->debug("[UTM] Locales found in '{$baseLangPath}': " . implode(', ', $locales));
+         return $locales;
+     }
 
     /**
-     * Builds the full translation file path.
-     *
-     * @param string $baseLangPath The base language directory path
-     * @param string $locale The locale
-     * @param string $package The package name
-     * @return string The full file path
+     * 🧱 Builds the translation file path (Standalone Mode).
+     * 
      */
-    protected function buildTranslationFilePath(string $baseLangPath, string $locale, string $package): string
-    {
-        return rtrim($baseLangPath, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . $locale . DIRECTORY_SEPARATOR . $package . '.php';
-    }
+     protected function buildTranslationFilePath(string $baseLangPath, string $locale, string $package): string
+     {
+         return rtrim($baseLangPath, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR .
+                $locale . DIRECTORY_SEPARATOR . $package . '.php';
+     }
 
     /**
-     * Builds the cache key.
-     *
-     * @param string|null $package The package name
-     * @param string $actualKey The actual key
-     * @param string $locale The locale
-     * @return string The cache key
+     * 🧱 Builds the cache key (Standalone Mode).
+     * 
      */
-    protected function buildCacheKey(?string $package, string $actualKey, string $locale): string
-    {
-        return ($this->config['cache_prefix'] ?? 'utm') . ".{$locale}." . ($package ?? 'APP') . ".{$actualKey}";
-    }
+     protected function buildCacheKey(?string $package, ?string $group, string $item, string $locale): string
+     {
+        $prefix = $this->config['cache_prefix'] ?? 'utm';
+         $packageSegment = $package ?? 'APP';
+         $keySegment = $group ? "{$group}.{$item}" : $item;
+         return "{$prefix}.{$locale}.{$packageSegment}.{$keySegment}";
+     }
+
 
     /**
-     * Returns a unique marker for a missing translation key.
-     *
-     * @param string|null $package The package name
-     * @param string|null $group The translation group
-     * @param string $item The translation item
-     * @return string The missing key marker
+     * 🧱 Returns the missing key marker (Standalone Mode).
+     * 
      */
-    protected function getMissingKeyMarker(?string $package, ?string $group, string $item): string
-    {
-        return "@@__MISSING_TRANSLATION__{$package}::{$group}.{$item}__@@";
-    }
+     protected function getMissingKeyMarker(?string $package, ?string $group, string $item): string
+     {
+         // Aggiungo $locale al marker per renderlo ancora più univoco se necessario
+         $locale = $this->getLocale();
+         return "@@__UTM_MISSING_{$locale}_{$package}::{$group}.{$item}__@@";
+     }
 
     /**
-     * Parses a key into package, group, and item components.
-     *
-     * @param string $key The translation key
-     * @return array [package, group, item]
+     * 🧱 Parses a key into package, group, item (Standalone Mode).
+     * Uses injected Logger.
+     * 
      */
-    protected function parseKey(string $key): array
-    {
-        $package = null;
-        $groupAndItem = $key;
+     protected function parseKey(string $key): array
+     {
+         $package = null;
+         $groupAndItem = $key;
+         if (str_contains($key, '::')) {
+             [$package, $groupAndItem] = explode('::', $key, 2);
+         }
+         $group = null;
+         $item = $groupAndItem;
+         $dotPosition = strpos($groupAndItem, '.');
+         if ($dotPosition !== false) {
+             $potentialGroup = substr($groupAndItem, 0, $dotPosition);
+             $potentialItem = substr($groupAndItem, $dotPosition + 1);
+             $group = $potentialGroup;
+             $item = $potentialItem;
+         }
+         $this->logger->debug("[UTM ParseKey] Key:'{$key}' -> Package:'{$package}', Group:'{$group}', Item:'{$item}'");
+         return [$package, $group, $item];
+     }
 
-        if (str_contains($key, '::')) {
-            list($package, $groupAndItem) = explode('::', $key, 2);
-        }
-
-        $group = null;
-        $item = $groupAndItem;
-
-        $dotPosition = strpos($groupAndItem, '.');
-        if ($dotPosition !== false) {
-            $group = substr($groupAndItem, 0, $dotPosition);
-            $item = substr($groupAndItem, $dotPosition + 1);
-        }
-
-        Log::debug("[UTM ParseKey] Key:'{$key}' -> Package:'{$package}', Group:'{$group}', Item:'{$item}'");
-        return [$package, $group, $item];
-    }
 
     /**
-     * Replaces placeholders (:param) in the translation string.
-     *
-     * @param string $translation The translation string
-     * @param array $replace Array of replacements
-     * @return string The translated string with placeholders replaced
+     * 🧱 Replaces placeholders (Standalone Mode).
+     * 
      */
-    protected function replacePlaceholders(string $translation, array $replace): string
-    {
-        if (empty($replace)) {
-            return $translation;
-        }
-        foreach ($replace as $key => $value) {
-            $translation = str_replace(':' . ltrim($key, ':'), $value, $translation);
-        }
-        return $translation;
-    }
+     protected function replacePlaceholders(string $translation, array $replace): string
+     {
+         if (empty($replace) || !str_contains($translation, ':')) {
+             return $translation;
+         }
+         foreach ($replace as $key => $value) {
+             $placeholder = ':' . ltrim((string)$key, ':');
+             $translation = str_replace($placeholder, (string)$value, $translation);
+         }
+         return $translation;
+     }
 }

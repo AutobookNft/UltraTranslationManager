@@ -13,23 +13,14 @@
         "php": "^8.1|^8.2|^8.3",
         "laravel/framework": "^11.0",
         "illuminate/support": "^11.0",
-        "illuminate/translation": "^11.0",
-        "illuminate/cache": "^11.0",
-        "ultra/ultra-log-manager": "dev-main"
+        "illuminate/translation": "^11.0", 
+        "illuminate/cache": "^11.0",      
+        "illuminate/filesystem": "^11.0" 
     },
-    "repositories": [
-        {
-            "type": "vcs",
-            "url": "https://github.com/AutobookNft/UltraLogManager.git"
-        },
-        {
-            "type": "vcs",
-            "url": "https://github.com/AutobookNft/UltraConfigManager.git"
-        }
-    ],
+    
     "autoload": {
         "psr-4": {
-            "Ultra\\TranslationManager\\": "src/"
+            "Ultra\\TranslationManager\\": "src/" 
         }
     },
     "extra": {
@@ -42,6 +33,6 @@
             }
         }
     },
-    "minimum-stability": "dev", 
-    "prefer-stable": true 
+    "minimum-stability": "dev",
+    "prefer-stable": true
 }
