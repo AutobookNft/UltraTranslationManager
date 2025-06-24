@@ -89,10 +89,10 @@ final class TranslationManager implements TranslatorContract
         $this->config = $config;
 
         // Log iniziale non cambia
-        $this->logger->debug(
-            "[UTM] TranslationManager instantiated (Standalone Mode). Cache enabled: " .
-            ($this->config['cache_enabled'] ? 'YES' : 'NO')
-        );
+        // $this->logger->debug(
+        //     "[UTM] TranslationManager instantiated (Standalone Mode). Cache enabled: " .
+        //     ($this->config['cache_enabled'] ? 'YES' : 'NO')
+        // );
     }
 
     /**
@@ -115,7 +115,7 @@ final class TranslationManager implements TranslatorContract
     {
         $fallback = true; // Comportamento di default interno
 
-        $this->logger->debug("[UTM GET ENTRY] Request for key: '{$key}', locale: '{$locale}'");
+        // $this->logger->debug("[UTM GET ENTRY] Request for key: '{$key}', locale: '{$locale}'");
         $key = (string) $key;
         $locale = $locale === null ? null : (string) $locale;
 
@@ -140,7 +140,7 @@ final class TranslationManager implements TranslatorContract
             $translation = $this->fetchTranslation($group, $item, $package, $currentLocale, $replace, $fallback);
             $missingMarker = $this->getMissingKeyMarker($package, $group, $item);
              if ($translation === $missingMarker) {
-                 $this->logger->debug("[UTM] 'Missing' marker found during fetch for key '{$key}'. Returning original key via LaravelTranslator.");
+                //  $this->logger->debug("[UTM] 'Missing' marker found during fetch for key '{$key}'. Returning original key via LaravelTranslator.");
                  return $this->laravelTranslator ? $this->laravelTranslator->get($key, $replace, $currentLocale, true) : $key;
             }
             // $this->logger->debug("[UTM GET NO CACHE] Returning fetched value for key '{$key}'");
@@ -256,19 +256,19 @@ final class TranslationManager implements TranslatorContract
     */
     protected function fetchTranslation(?string $group, string $item, ?string $package, string $locale, array $replace, bool $fallback): string|array
     {
-        $this->logger->debug("[UTM Fetch] Starting fetch for item='{$item}', group='{$group}', package='{$package}', locale='{$locale}'");
+        // $this->logger->debug("[UTM Fetch] Starting fetch for item='{$item}', group='{$group}', package='{$package}', locale='{$locale}'");
         // 1. Check In-Memory Cache
         if ($package && isset($this->translations[$package][$locale])) {
             $keyInDotNotation = $group ? "{$group}.{$item}" : $item;
             if (\Illuminate\Support\Arr::has($this->translations[$package][$locale], $keyInDotNotation)) {
             $translation = \Illuminate\Support\Arr::get($this->translations[$package][$locale], $keyInDotNotation);
-                $this->logger->debug("[UTM Fetch] Item '{$keyInDotNotation}' FOUND in-memory (package: '{$package}').");
+                // $this->logger->debug("[UTM Fetch] Item '{$keyInDotNotation}' FOUND in-memory (package: '{$package}').");
                 return $translation;
             } else {
-                $this->logger->debug("[UTM Fetch] Item '{$keyInDotNotation}' NOT found in-memory in [{$package}][{$locale}]. Proceeding to fallback...");
+                // $this->logger->debug("[UTM Fetch] Item '{$keyInDotNotation}' NOT found in-memory in [{$package}][{$locale}]. Proceeding to fallback...");
             }
         } else {
-            $this->logger->debug("[UTM Fetch] In-memory array for '{$package}' [{$locale}] not found or package is null. Proceeding to fallback...");
+            // $this->logger->debug("[UTM Fetch] In-memory array for '{$package}' [{$locale}] not found or package is null. Proceeding to fallback...");
         }
         // 2. Fallback to Laravel Translator
         if (!$this->laravelTranslator) {
@@ -277,7 +277,7 @@ final class TranslationManager implements TranslatorContract
         }
         $laravelKey = $package ? "{$package}::" : '';
         $laravelKey .= $group ? "{$group}.{$item}" : $item;
-        $this->logger->debug("[UTM Fetch] Attempting fallback with Laravel key: '{$laravelKey}'");
+        // $this->logger->debug("[UTM Fetch] Attempting fallback with Laravel key: '{$laravelKey}'");
         $translation = $this->laravelTranslator->get($laravelKey, $replace, $locale, false);
         if ($translation === $laravelKey) {
             if ($fallback) {
@@ -287,7 +287,7 @@ final class TranslationManager implements TranslatorContract
                     $this->logger->warning("[UTM Fetch] Fallback failed to find key: '{$laravelKey}' even with fallback locale.");
                     return $this->getMissingKeyMarker($package, $group, $item);
                 } else {
-                    $this->logger->debug("[UTM Fetch] Key '{$laravelKey}' FOUND via Laravel fallback locale.");
+                    // $this->logger->debug("[UTM Fetch] Key '{$laravelKey}' FOUND via Laravel fallback locale.");
                     return $translation;
                 }
             } else {
@@ -295,7 +295,7 @@ final class TranslationManager implements TranslatorContract
                 return $this->getMissingKeyMarker($package, $group, $item);
             }
         } else {
-            $this->logger->debug("[UTM Fetch] Key '{$laravelKey}' FOUND via LaravelTranslator in locale '{$locale}'.");
+            // $this->logger->debug("[UTM Fetch] Key '{$laravelKey}' FOUND via LaravelTranslator in locale '{$locale}'.");
             return $translation;
         }
     }
