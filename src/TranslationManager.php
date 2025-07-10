@@ -416,4 +416,11 @@ final class TranslationManager implements TranslatorContract
         }
         return $translation;
     }
+
+    public function getLoader()
+    {
+        // Restituisce il loader del traduttore Laravel se disponibile.
+        // Serve solo per compatibilità con il metodo originale.
+        return $this->laravelTranslator?->getLoader();
+    }
 }
